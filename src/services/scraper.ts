@@ -4,7 +4,7 @@ import { Timestamp } from '@google-cloud/firestore';
 import { config } from '../config.js';
 import { logger } from '../utils/logger.js';
 import { RateLimiter, ExponentialBackoff } from '../utils/rate-limiter.js';
-import type { Store, StoreAvailability, ScrapedAvailability, AvailabilityResult } from '../types/index.js';
+import type { Store, StoreAvailability, AvailabilityResult } from '../types/index.js';
 
 /**
  * Enriched product data scraped from product page
@@ -20,6 +20,54 @@ export interface EnrichedProductData {
   smokinessLabel: string | null;
 }
 import { getFirestoreService } from './firestore.js';
+
+/**
+ * Response item from Alko's availability API:
+ * GET /api/product-api/availability/{productId}
+ */
+export interface AvailabilityApiResponse {
+  id: string;           // Store ID (e.g., "2224")
+  count: number;        // Exact stock quantity
+  storeName: string;    // Store name (e.g., "Mynämäki")
+  outletType: string;   // "1" = store
+  address: string;      // Street address
+  latitude: number;
+  longitude: number;
+  openHours: Array<{ hours: string; date: string }>;
+  city: string;
+  postalCode: string;
+  open: boolean;        // Whether store is currently open
+}
+
+/**
+ * Parse the availability API response into StoreAvailability entities.
+ * Exported for testing.
+ */
+export function parseAvailabilityApiResponse(
+  productId: string,
+  apiData: AvailabilityApiResponse[]
+): StoreAvailability[] {
+  if (!Array.isArray(apiData)) {
+    return [];
+  }
+
+  return apiData
+    .filter((item) => item.count > 0)
+    .map((item) => {
+      const quantity = item.count;
+      return {
+        id: `${productId}_${item.id}`,
+        productId,
+        storeId: item.id,
+        storeName: item.storeName,
+        storeLink: `/fi/myymalat-palvelut/${item.id}`,
+        quantity,
+        status: (quantity > 5 ? 'in_stock' : quantity > 0 ? 'low_stock' : 'out_of_stock') as StoreAvailability['status'],
+        lastUpdated: '',
+        checkedAt: Timestamp.now(),
+      };
+    });
+}
 
 /**
  * Alko website scraper for store availability
@@ -150,7 +198,9 @@ export class AlkoScraper {
   }
 
   /**
-   * Get store availability for a product
+   * Get store availability for a product using Alko's availability API.
+   * The new alko.fi site exposes /api/product-api/availability/{productId}
+   * which returns JSON with store-level stock data.
    */
   async getProductAvailability(
     productId: string,
@@ -172,117 +222,20 @@ export class AlkoScraper {
     // Apply rate limiting
     await this.rateLimiter.throttleWithJitter();
 
-    logger.info(`Scraping availability for product ${productId}`);
+    logger.info(`Fetching availability for product ${productId} via API`);
 
     try {
-      // Navigate to product page
-      await this.page!.goto(`https://www.alko.fi/tuotteet/${productId}`, {
-        waitUntil: 'domcontentloaded',
-        timeout: 30000,
-      });
-
-      // Wait for page to load
-      await this.page!.waitForTimeout(2000);
-
-      // Click on "Katso myymäläsaatavuus" link to open the availability panel
-      try {
-        const availabilityLink = await this.page!.$(
-          'a:has-text("myymäläsaatavuus"), a:has-text("Saatavuus")'
-        );
-        if (availabilityLink) {
-          logger.info('Found availability link, clicking...');
-          await availabilityLink.click();
-          // Wait for the store list panel to open and load
-          await this.page!.waitForTimeout(3000);
-
-          // Click on dropdown to reveal store list (the "Määrä myymälässä" dropdown)
-          const dropdown = await this.page!.$(
-            '.stock-availability .dropdown, .off-canvas-stock-availability .dropdown, [class*="is-dropdown-submenu-parent"]'
-          );
-          if (dropdown) {
-            logger.info('Found dropdown, clicking...');
-            await dropdown.click();
-            await this.page!.waitForTimeout(2000);
-          } else {
-            logger.info('No dropdown found, stores might be directly visible');
-          }
-        } else {
-          logger.info('Availability link not found on page');
-        }
-      } catch (error) {
-        logger.debug('Availability link click failed', { error });
-      }
-
-      // Debug: Check how many store items exist on the page
-      const storeItemCount = await this.page!.evaluate(
-        `document.querySelectorAll('li.store-item.stockInStore').length`
-      );
-      logger.info(`Found ${storeItemCount} store items on page`);
-
-      // Extract availability data from li.store-item elements
-      // Structure: li.store-item.stockInStore > a.store-item-link > span.store-in-stock + span.number-in-stock
-      const scrapedData: ScrapedAvailability[] = await this.page!.evaluate(`
-        (() => {
-          const items = [];
-          const seenStores = new Set();
-
-          // Store items are LI elements with class store-item stockInStore
-          const storeItems = document.querySelectorAll('li.store-item.stockInStore');
-
-          storeItems.forEach((item) => {
-            // Get store name from span.store-in-stock
-            const nameSpan = item.querySelector('span.store-in-stock, span.option-text');
-            const storeName = nameSpan?.textContent?.trim() || '';
-            if (!storeName) return;
-
-            // Skip duplicates
-            if (seenStores.has(storeName)) return;
-            seenStores.add(storeName);
-
-            // Get quantity from span.number-in-stock
-            const quantitySpan = item.querySelector('span.number-in-stock');
-            const quantityText = quantitySpan?.textContent?.trim() || '0';
-
-            // Extract quantity from range (e.g., "11-15" -> 11)
-            const quantityMatch = quantityText.match(/(\\d+)/);
-            const amount = quantityMatch ? quantityMatch[1] : '0';
-
-            // Get link with store URL
-            const link = item.querySelector('a');
-            const dataUrl = link?.getAttribute('data-url') || '';
-            const href = link?.getAttribute('href') || '';
-
-            items.push({
-              storeName,
-              storeLink: dataUrl || href,
-              amount,
-              lastUpdated: '',
-            });
-          });
-
-          return items;
+      // Call the availability API from the browser context (uses session cookies)
+      const apiData: AvailabilityApiResponse[] = await this.page!.evaluate(`
+        (async () => {
+          const resp = await fetch('/api/product-api/availability/${productId}');
+          if (!resp.ok) throw new Error('API returned ' + resp.status);
+          return resp.json();
         })()
       `);
 
-      // Convert scraped data to StoreAvailability entities
-      const stores: StoreAvailability[] = scrapedData.map((data) => {
-        const quantity = parseInt(String(data.amount).replace(/\D/g, ''), 10) || 0;
-        // Extract store ID from link (format: /myymalat-palvelut/XXXX or similar)
-        const storeIdMatch = data.storeLink.match(/\/(\d+)(?:[/?]|$)/);
-        const storeId = storeIdMatch ? storeIdMatch[1] : data.storeName.replace(/\s/g, '_');
-
-        return {
-          id: `${productId}_${storeId}`,
-          productId,
-          storeId,
-          storeName: data.storeName,
-          storeLink: data.storeLink,
-          quantity,
-          status: quantity > 5 ? 'in_stock' : quantity > 0 ? 'low_stock' : 'out_of_stock',
-          lastUpdated: data.lastUpdated,
-          checkedAt: Timestamp.now(),
-        };
-      });
+      // Convert API response to StoreAvailability entities
+      const stores: StoreAvailability[] = parseAvailabilityApiResponse(productId, apiData);
 
       const result: AvailabilityResult = {
         productId,
@@ -305,7 +258,7 @@ export class AlkoScraper {
 
       return result;
     } catch (error) {
-      logger.error(`Failed to scrape availability for product ${productId}`, { error });
+      logger.error(`Failed to fetch availability for product ${productId}`, { error });
 
       // Apply exponential backoff
       await this.backoff.wait();
