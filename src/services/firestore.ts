@@ -346,7 +346,7 @@ export class FirestoreService {
    * Get availability for a product
    */
   async getAvailability(productId: string, city?: string): Promise<StoreAvailability[]> {
-    let query = this.db.collection('availability').where('productId', '==', productId);
+    const query = this.db.collection('availability').where('productId', '==', productId);
     if (city) {
       // Would need to join with stores collection or denormalize city
       // For now, fetch all and filter client-side

@@ -228,7 +228,7 @@ export async function getRecommendations(input: GetRecommendationsInput): Promis
   }
 
   // Adjust price range with occasion multiplier
-  let minPrice = input.priceRange?.min;
+  const minPrice = input.priceRange?.min;
   let maxPrice = input.priceRange?.max;
   if (priceMultiplier !== 1 && maxPrice) {
     maxPrice = maxPrice * priceMultiplier;

@@ -462,8 +462,8 @@ export class AlkoScraper {
     // Parse address to extract city and postal code
     // Format: "Kauppakatu 32, 78200 Varkaus" or "Street, 00100 Helsinki"
     const addressParts = data.address.split(',').map((s) => s.trim());
-    let street = addressParts[0] || '';
-    let postalAndCity = addressParts[1] || '';
+    const street = addressParts[0] || '';
+    const postalAndCity = addressParts[1] || '';
 
     // Extract postal code and city from "78200 Varkaus"
     const postalMatch = postalAndCity.match(/^(\d{5})\s+(.+)$/);
