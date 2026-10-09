@@ -76,7 +76,8 @@ COPY --from=builder /app/dist ./dist
 
 # Copy seed data for auto-loading on first request
 # This allows the server to bootstrap Firestore if empty
-COPY data ./data
+# COPY data ./data
+RUN mkdir -p ./data
 
 # Set environment variables
 ENV NODE_ENV=production
