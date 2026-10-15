@@ -95,18 +95,18 @@ export class WhiskybaseScraper {
 
         await this.page!.goto(searchUrl, {
           waitUntil: 'domcontentloaded',
-          timeout: 20000,
+          timeout: 25000,
         });
 
-        // Fast wait for search results table
+        // Wait for search results table (giving Cloudflare challenge up to 10s if needed)
         try {
-          await this.page!.waitForSelector('a[href*="/whiskies/whisky/"]', { timeout: 6000 });
+          await this.page!.waitForSelector('table tbody tr a[href*="/whiskies/whisky/"]', { timeout: 10000 });
         } catch {
-          // In case Cloudflare challenge is passing, wait slightly
-          await this.page!.waitForTimeout(2500);
+          // In case Cloudflare challenge or dynamic table is still rendering
+          await this.page!.waitForTimeout(3000);
         }
 
-        // Extract search row data directly
+        // Extract search rows data and score them to find the best match
         const searchData: {
           href: string | null;
           name: string;
@@ -114,8 +114,13 @@ export class WhiskybaseScraper {
           votesCount: number;
           whiskybaseId: string | null;
         } | null = await this.page!.evaluate(`
-          (() => {
+          ((query) => {
+            const queryClean = (query || '').toLowerCase().trim();
+            const queryWords = queryClean.split(/[\\s,-]+/).filter((w) => w.length > 0);
+
             const rows = Array.from(document.querySelectorAll('table tbody tr'));
+            const candidates = [];
+
             for (const row of rows) {
               const link = row.querySelector('a[href*="/whiskies/whisky/"]');
               if (!link) continue;
@@ -123,56 +128,106 @@ export class WhiskybaseScraper {
               if (!href) continue;
 
               const name = link.textContent ? link.textContent.trim().replace(/\\s+/g, ' ') : '';
-              
+              const lowerName = name.toLowerCase();
+
               let whiskybaseId = null;
               const idMatch = href.match(/\\/whiskies\\/whisky\\/(\\d+)/);
               if (idMatch) {
                 whiskybaseId = 'WB' + idMatch[1];
               }
 
-              // Extract rating from row cells or text
+              // Extract rating from row cells
               let rating = null;
-              const rowText = row.innerText || row.textContent || '';
-              // Match scores like 86.92 or 88.5 or 90
-              const m = rowText.match(/\\b([789]\\d(?:\\.\\d{1,2})?)\\b/);
-              if (m) {
-                const val = parseFloat(m[1]);
-                if (val >= 60 && val <= 100) {
-                  rating = val;
+              const tds = Array.from(row.querySelectorAll('td'));
+              
+              // In Whiskybase table: column 10 (index 9) is rating
+              if (tds.length >= 10) {
+                const ratingCellText = tds[9].textContent || '';
+                const m = ratingCellText.match(/([5-9]\\d(?:\\.\\d{1,2})?)/);
+                if (m) {
+                  const val = parseFloat(m[1]);
+                  if (val >= 50 && val <= 100) rating = val;
                 }
               }
 
-              // Check if vote count is in row
+              // Fallback to checking star or rating spans or full row text
+              if (rating === null) {
+                const ratingEl = row.querySelector('[class*="rating"], span:has(div)');
+                const text = ratingEl ? ratingEl.textContent : row.textContent;
+                const m = text ? text.match(/\\b([5-9]\\d\\.\\d{2})\\b/) : null;
+                if (m) {
+                  const val = parseFloat(m[1]);
+                  if (val >= 50 && val <= 100) rating = val;
+                }
+              }
+
+              // Check vote count
               let votesCount = 0;
+              const rowText = row.innerText || row.textContent || '';
               const vMatch = rowText.match(/(\\d[\\d\\s,]*)\\s*(?:ratings|votes)/i);
               if (vMatch) {
                 votesCount = parseInt(vMatch[1].replace(/[\\s,]/g, ''), 10);
               }
 
-              return {
+              // Calculate relevance score against query
+              let score = 0;
+              if (queryWords.length > 0) {
+                // If bottle name starts with primary query word (e.g. "laphroaig")
+                if (lowerName.startsWith(queryWords[0])) {
+                  score += 60;
+                }
+                // Check how many query words match
+                let matchesAll = true;
+                for (const w of queryWords) {
+                  if (lowerName.includes(w)) {
+                    score += 25;
+                  } else {
+                    matchesAll = false;
+                  }
+                }
+                if (matchesAll) {
+                  score += 40;
+                }
+                // Penalize blends or independent bottlings if user didn't ask for blend
+                if ((lowerName.includes('blended') || lowerName.includes('blend')) && !queryClean.includes('blend')) {
+                  score -= 50;
+                }
+                // Bonus for having a valid rating > 0
+                if (rating !== null && rating > 0) {
+                  score += 20;
+                }
+              }
+
+              candidates.push({
                 href,
                 name,
                 rating,
                 votesCount,
                 whiskybaseId,
-              };
+                score,
+              });
             }
 
-            // Fallback link
-            const fallbackLink = document.querySelector('a[href*="/whiskies/whisky/"]');
-            if (fallbackLink) {
-              const href = fallbackLink.getAttribute('href');
-              const name = fallbackLink.textContent ? fallbackLink.textContent.trim().replace(/\\s+/g, ' ') : '';
-              let whiskybaseId = null;
-              if (href) {
-                const idMatch = href.match(/\\/whiskies\\/whisky\\/(\\d+)/);
-                if (idMatch) whiskybaseId = 'WB' + idMatch[1];
+            if (candidates.length === 0) {
+              // Fallback link
+              const fallbackLink = document.querySelector('a[href*="/whiskies/whisky/"]');
+              if (fallbackLink) {
+                const href = fallbackLink.getAttribute('href');
+                const name = fallbackLink.textContent ? fallbackLink.textContent.trim().replace(/\\s+/g, ' ') : '';
+                let whiskybaseId = null;
+                if (href) {
+                  const idMatch = href.match(/\\/whiskies\\/whisky\\/(\\d+)/);
+                  if (idMatch) whiskybaseId = 'WB' + idMatch[1];
+                }
+                return { href, name, rating: null, votesCount: 0, whiskybaseId };
               }
-              return { href, name, rating: null, votesCount: 0, whiskybaseId };
+              return null;
             }
 
-            return null;
-          })()
+            // Sort candidates by highest score
+            candidates.sort((a, b) => b.score - a.score);
+            return candidates[0];
+          })(${JSON.stringify(searchQuery)})
         `);
 
         if (!searchData || !searchData.href) {
@@ -191,7 +246,7 @@ export class WhiskybaseScraper {
           : `https://www.whiskybase.com${searchData.href.startsWith('/') ? '' : '/'}${searchData.href}`;
 
         // IF RATING WAS ALREADY FOUND IN THE SEARCH ROW, RETURN IMMEDIATELY!
-        if (searchData.rating !== null) {
+        if (searchData.rating !== null && searchData.rating > 0) {
           const ratingObj: WhiskybaseRating = {
             whiskyName: searchData.name || searchQuery,
             distillery: distillery || null,
