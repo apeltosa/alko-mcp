@@ -89,11 +89,19 @@ export class WhiskybaseScraper {
     // Inject stealth script
     await page.addInitScript(`
       Object.defineProperty(navigator, 'webdriver', {
-        get: () => undefined,
+        get: () => false,
       });
-      window.chrome = { runtime: {} };
+      window.chrome = {
+        runtime: {},
+        loadTimes: function() {},
+        csi: function() {},
+        app: {},
+      };
       Object.defineProperty(navigator, 'languages', {
         get: () => ['en-US', 'en'],
+      });
+      Object.defineProperty(navigator, 'plugins', {
+        get: () => [1, 2, 3, 4, 5],
       });
     `);
 
@@ -111,11 +119,28 @@ export class WhiskybaseScraper {
           timeout: 20000,
         });
 
-        // Wait for search results (allowing sufficient time for Cloudflare challenge check)
-        try {
-          await page.waitForSelector('a[href*="/whiskies/whisky/"]', { timeout: 14000 });
-        } catch {
-          // Cloudflare check or dynamic table rendering wait
+        // Wait for search results or handle Cloudflare Turnstile challenge
+        const searchStartTime = Date.now();
+        while (Date.now() - searchStartTime < 14000) {
+          const linksCount = await page.locator('a[href*="/whiskies/whisky/"]').count().catch(() => 0);
+          if (linksCount > 0) {
+            break;
+          }
+
+          // Check if Cloudflare Turnstile challenge iframe is present and attempt click
+          const cfFrame = page.frames().find((f) => f.url().includes('challenges.cloudflare.com'));
+          if (cfFrame) {
+            try {
+              const cb = cfFrame.locator('input[type="checkbox"], #challenge-stage, .ctp-checkbox-label, div[role="checkbox"]');
+              if ((await cb.count()) > 0) {
+                logger.info('Cloudflare Turnstile challenge detected. Attempting checkbox click.');
+                await cb.first().click().catch(() => {});
+              }
+            } catch (err) {
+              logger.debug('Turnstile click attempt caught error', { error: err });
+            }
+          }
+
           await page.waitForTimeout(1000);
         }
 
@@ -300,10 +325,26 @@ export class WhiskybaseScraper {
         timeout: 15000,
       });
 
-      try {
-        await page.waitForSelector('[itemprop="ratingValue"], .whisky-rating, h1', { timeout: 4000 });
-      } catch {
-        await page.waitForTimeout(1500);
+      // Wait for rating details or handle Cloudflare Turnstile challenge
+      const detailStartTime = Date.now();
+      while (Date.now() - detailStartTime < 8000) {
+        const ratingCount = await page.locator('[itemprop="ratingValue"], .whisky-rating, h1').count().catch(() => 0);
+        if (ratingCount > 0) {
+          break;
+        }
+
+        const cfFrame = page.frames().find((f) => f.url().includes('challenges.cloudflare.com'));
+        if (cfFrame) {
+          try {
+            const cb = cfFrame.locator('input[type="checkbox"], #challenge-stage, .ctp-checkbox-label, div[role="checkbox"]');
+            if ((await cb.count()) > 0) {
+              logger.info('Turnstile challenge detected on detail page. Attempting click.');
+              await cb.first().click().catch(() => {});
+            }
+          } catch {}
+        }
+
+        await page.waitForTimeout(1000);
       }
 
       const details: {
