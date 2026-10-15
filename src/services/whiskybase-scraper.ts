@@ -1,4 +1,4 @@
-import { chromium, Browser, BrowserContext, Page } from 'playwright';
+import { chromium, Browser, BrowserContext } from 'playwright';
 import { LRUCache } from 'lru-cache';
 import { logger } from '../utils/logger.js';
 import { ExponentialBackoff } from '../utils/rate-limiter.js';
