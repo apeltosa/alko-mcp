@@ -21,6 +21,8 @@ import {
   getRecommendationsSchema,
   getVivinoRating,
   getVivinoRatingSchema,
+  getWhiskybaseRating,
+  getWhiskybaseRatingSchema,
 } from './tools/index.js';
 
 /**
@@ -47,6 +49,7 @@ function toCompactJson(data: unknown): string {
 import { getDataSyncService } from './services/data-sync.js';
 import { getAlkoScraper } from './services/scraper.js';
 import { getVivinoScraper } from './services/vivino-scraper.js';
+import { getWhiskybaseScraper } from './services/whiskybase-scraper.js';
 
 /**
  * Create and configure the MCP server
@@ -220,6 +223,29 @@ function createMcpServer(): McpServer {
     }
   );
 
+  // Get Whiskybase Rating
+  server.registerTool(
+    'get_whiskybase_rating',
+    {
+      title: 'Get Whiskybase Whisky Rating',
+      description:
+        'Look up whisky ratings and scores from Whiskybase.com. Search by whisky name / distillery or provide direct URL. Returns: score (0-100), votes count, WB-ID, and whisky details. Results are cached.',
+      inputSchema: getWhiskybaseRatingSchema._def.schema.shape,
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+    },
+    async (params) => {
+      const result = await getWhiskybaseRating(params as never);
+      return {
+        content: [{ type: 'text', text: toCompactJson(result) }],
+      };
+    }
+  );
+
   // Sync Products (admin tool)
   server.registerTool(
     'sync_products',
@@ -373,7 +399,8 @@ async function main(): Promise<void> {
       logger.info('Shutting down...');
       const alkoScraper = getAlkoScraper();
       const vivinoScraper = getVivinoScraper();
-      await Promise.all([alkoScraper.close(), vivinoScraper.close()]);
+      const whiskybaseScraper = getWhiskybaseScraper();
+      await Promise.all([alkoScraper.close(), vivinoScraper.close(), whiskybaseScraper.close()]);
       process.exit(0);
     });
 
@@ -381,7 +408,8 @@ async function main(): Promise<void> {
       logger.info('Shutting down...');
       const alkoScraper = getAlkoScraper();
       const vivinoScraper = getVivinoScraper();
-      await Promise.all([alkoScraper.close(), vivinoScraper.close()]);
+      const whiskybaseScraper = getWhiskybaseScraper();
+      await Promise.all([alkoScraper.close(), vivinoScraper.close(), whiskybaseScraper.close()]);
       process.exit(0);
     });
   } catch (error) {
