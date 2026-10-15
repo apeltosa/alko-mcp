@@ -23,6 +23,8 @@ import {
   getVivinoRatingSchema,
   getWhiskybaseRating,
   getWhiskybaseRatingSchema,
+  getUntappdRating,
+  getUntappdRatingSchema,
 } from './tools/index.js';
 
 /**
@@ -240,6 +242,29 @@ function createMcpServer(): McpServer {
     },
     async (params) => {
       const result = await getWhiskybaseRating(params as never);
+      return {
+        content: [{ type: 'text', text: toCompactJson(result) }],
+      };
+    }
+  );
+
+  // Get Untappd Rating
+  server.registerTool(
+    'get_untappd_rating',
+    {
+      title: 'Get Untappd Beer Rating',
+      description:
+        'Look up beer/cider ratings and scores from Untappd. Search by beer name and/or brewery. Returns: average rating (0-5 stars), ratings count, beer style, ABV, and Untappd URL. Results are cached.',
+      inputSchema: getUntappdRatingSchema._def.schema.shape,
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+    },
+    async (params) => {
+      const result = await getUntappdRating(params as never);
       return {
         content: [{ type: 'text', text: toCompactJson(result) }],
       };

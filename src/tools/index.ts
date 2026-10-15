@@ -6,3 +6,4 @@ export * from './get-store-hours.js';
 export * from './get-recommendations.js';
 export * from './get-vivino-rating.js';
 export * from './get-whiskybase-rating.js';
+export * from './get-untappd-rating.js';
