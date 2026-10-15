@@ -18,7 +18,7 @@ export class WhiskybaseScraper {
   private memoryCache: LRUCache<string, WhiskybaseRatingResult>;
 
   constructor() {
-    this.rateLimiter = new RateLimiter(2000);
+    this.rateLimiter = new RateLimiter(1500);
     this.backoff = new ExponentialBackoff();
     this.memoryCache = new LRUCache<string, WhiskybaseRatingResult>({
       max: 500,
@@ -95,41 +95,87 @@ export class WhiskybaseScraper {
 
         await this.page!.goto(searchUrl, {
           waitUntil: 'domcontentloaded',
-          timeout: 30000,
+          timeout: 20000,
         });
 
-        // Allow Cloudflare challenge / JS execution to complete
-        await this.page!.waitForTimeout(3500);
-
-        // Check if bot verification challenge is still running
-        const pageContent = await this.page!.content();
-        if (pageContent.includes('confirm you are human') && pageContent.includes('challenge-running')) {
-          await this.page!.waitForTimeout(4000);
+        // Fast wait for search results table
+        try {
+          await this.page!.waitForSelector('a[href*="/whiskies/whisky/"]', { timeout: 6000 });
+        } catch {
+          // In case Cloudflare challenge is passing, wait slightly
+          await this.page!.waitForTimeout(2500);
         }
 
-        // Find top bottle link
-        const firstMatch: { href: string; name?: string } | null = await this.page!.evaluate(`
+        // Extract search row data directly
+        const searchData: {
+          href: string | null;
+          name: string;
+          rating: number | null;
+          votesCount: number;
+          whiskybaseId: string | null;
+        } | null = await this.page!.evaluate(`
           (() => {
             const rows = Array.from(document.querySelectorAll('table tbody tr'));
             for (const row of rows) {
               const link = row.querySelector('a[href*="/whiskies/whisky/"]');
               if (!link) continue;
               const href = link.getAttribute('href');
-              const name = link.textContent ? link.textContent.trim() : '';
-              return { href, name };
-            }
-            const fallbackLink = document.querySelector('a[href*="/whiskies/whisky/"]');
-            if (fallbackLink) {
+              if (!href) continue;
+
+              const name = link.textContent ? link.textContent.trim().replace(/\\s+/g, ' ') : '';
+              
+              let whiskybaseId = null;
+              const idMatch = href.match(/\\/whiskies\\/whisky\\/(\\d+)/);
+              if (idMatch) {
+                whiskybaseId = 'WB' + idMatch[1];
+              }
+
+              // Extract rating from row cells or text
+              let rating = null;
+              const rowText = row.innerText || row.textContent || '';
+              // Match scores like 86.92 or 88.5 or 90
+              const m = rowText.match(/\\b([789]\\d(?:\\.\\d{1,2})?)\\b/);
+              if (m) {
+                const val = parseFloat(m[1]);
+                if (val >= 60 && val <= 100) {
+                  rating = val;
+                }
+              }
+
+              // Check if vote count is in row
+              let votesCount = 0;
+              const vMatch = rowText.match(/(\\d[\\d\\s,]*)\\s*(?:ratings|votes)/i);
+              if (vMatch) {
+                votesCount = parseInt(vMatch[1].replace(/[\\s,]/g, ''), 10);
+              }
+
               return {
-                href: fallbackLink.getAttribute('href'),
-                name: fallbackLink.textContent ? fallbackLink.textContent.trim() : '',
+                href,
+                name,
+                rating,
+                votesCount,
+                whiskybaseId,
               };
             }
+
+            // Fallback link
+            const fallbackLink = document.querySelector('a[href*="/whiskies/whisky/"]');
+            if (fallbackLink) {
+              const href = fallbackLink.getAttribute('href');
+              const name = fallbackLink.textContent ? fallbackLink.textContent.trim().replace(/\\s+/g, ' ') : '';
+              let whiskybaseId = null;
+              if (href) {
+                const idMatch = href.match(/\\/whiskies\\/whisky\\/(\\d+)/);
+                if (idMatch) whiskybaseId = 'WB' + idMatch[1];
+              }
+              return { href, name, rating: null, votesCount: 0, whiskybaseId };
+            }
+
             return null;
           })()
         `);
 
-        if (!firstMatch || !firstMatch.href) {
+        if (!searchData || !searchData.href) {
           const notFoundResult: WhiskybaseRatingResult = {
             found: false,
             rating: null,
@@ -140,19 +186,48 @@ export class WhiskybaseScraper {
           return notFoundResult;
         }
 
-        targetUrl = firstMatch.href.startsWith('http')
-          ? firstMatch.href
-          : `https://www.whiskybase.com${firstMatch.href.startsWith('/') ? '' : '/'}${firstMatch.href}`;
+        targetUrl = searchData.href.startsWith('http')
+          ? searchData.href
+          : `https://www.whiskybase.com${searchData.href.startsWith('/') ? '' : '/'}${searchData.href}`;
+
+        // IF RATING WAS ALREADY FOUND IN THE SEARCH ROW, RETURN IMMEDIATELY!
+        if (searchData.rating !== null) {
+          const ratingObj: WhiskybaseRating = {
+            whiskyName: searchData.name || searchQuery,
+            distillery: distillery || null,
+            rating: searchData.rating,
+            votesCount: searchData.votesCount,
+            whiskybaseId: searchData.whiskybaseId,
+            whiskybaseUrl: targetUrl,
+            fetchedAt: new Date(),
+          };
+
+          const result: WhiskybaseRatingResult = {
+            found: true,
+            rating: ratingObj,
+            error: null,
+            fromCache: false,
+          };
+
+          this.memoryCache.set(cacheKey, result);
+          logger.info(`Got Whiskybase rating directly from search row: ${ratingObj.rating}/100 (${ratingObj.whiskybaseId}) for ${ratingObj.whiskyName}`);
+          return result;
+        }
       }
 
+      // If rating was not in search row, navigate to detail page
       logger.info(`Fetching Whiskybase details from: ${targetUrl}`);
 
       await this.page!.goto(targetUrl, {
         waitUntil: 'domcontentloaded',
-        timeout: 30000,
+        timeout: 20000,
       });
 
-      await this.page!.waitForTimeout(2500);
+      try {
+        await this.page!.waitForSelector('[itemprop="ratingValue"], .whisky-rating, h1', { timeout: 4000 });
+      } catch {
+        await this.page!.waitForTimeout(1500);
+      }
 
       const details: {
         whiskyName: string;
@@ -160,8 +235,6 @@ export class WhiskybaseScraper {
         rating: number | null;
         votesCount: number;
         whiskybaseId: string | null;
-        statedAge: string | null;
-        strength: string | null;
       } = await this.page!.evaluate(`
         (() => {
           const titleEl = document.querySelector('h1') || document.querySelector('#whisky-details-title') || document.querySelector('.whisky-page-header');
@@ -212,8 +285,6 @@ export class WhiskybaseScraper {
             rating,
             votesCount,
             whiskybaseId,
-            statedAge: null,
-            strength: null,
           };
         })()
       `);
