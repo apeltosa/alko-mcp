@@ -92,6 +92,9 @@ export class WhiskybaseScraper {
         get: () => undefined,
       });
       window.chrome = { runtime: {} };
+      Object.defineProperty(navigator, 'languages', {
+        get: () => ['en-US', 'en'],
+      });
     `);
 
     try {
@@ -108,12 +111,12 @@ export class WhiskybaseScraper {
           timeout: 20000,
         });
 
-        // Wait for search results
+        // Wait for search results (allowing sufficient time for Cloudflare challenge check)
         try {
-          await page.waitForSelector('a[href*="/whiskies/whisky/"]', { timeout: 7000 });
+          await page.waitForSelector('a[href*="/whiskies/whisky/"]', { timeout: 14000 });
         } catch {
           // Cloudflare check or dynamic table rendering wait
-          await page.waitForTimeout(2000);
+          await page.waitForTimeout(1000);
         }
 
         // Extract search rows data and score them to find the best match
@@ -257,7 +260,6 @@ export class WhiskybaseScraper {
             error: `Whiskybase-hakutulos: Ei löytynyt viskiä haulla "${searchQuery}".`,
             fromCache: false,
           };
-          this.memoryCache.set(cacheKey, notFoundResult);
           return notFoundResult;
         }
 
