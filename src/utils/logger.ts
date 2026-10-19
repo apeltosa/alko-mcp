@@ -3,30 +3,40 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 
-// Log file path - write to temp directory
-const logFilePath = path.join(os.tmpdir(), 'alko-mcp.log');
+// Only log to file in local STDIO development (not in production / HTTP mode)
+// In container environments (like Render or Cloud Run), /tmp is on tmpfs (RAM),
+// and persistent file logging without rotation causes memory leaks.
+const isProductionOrHttp =
+  process.env.NODE_ENV === 'production' ||
+  process.env.MCP_TRANSPORT === 'http' ||
+  !!process.env.PORT ||
+  process.env.DISABLE_FILE_LOGGING === 'true';
 
-// Create a write stream for file logging
-const logFileStream = fs.createWriteStream(logFilePath, { flags: 'a' });
+const streams: pino.StreamEntry[] = [{ stream: pino.destination(2) }]; // Always write to stderr
+
+let logFilePath: string | null = null;
+if (!isProductionOrHttp) {
+  logFilePath = path.join(os.tmpdir(), 'alko-mcp.log');
+  const logFileStream = fs.createWriteStream(logFilePath, { flags: 'a' });
+  streams.push({ stream: logFileStream });
+}
 
 /**
  * Application logger using pino
- * IMPORTANT: Writes to stderr AND a log file for debugging
+ * IMPORTANT: Writes to stderr (and optional temp log file only in local stdio dev)
  * MCP uses stdout for JSON-RPC communication, so all logs must go to stderr
  */
 const pinoLogger = pino(
   {
     level: process.env.LOG_LEVEL || 'info',
   },
-  // Write to multiple destinations: stderr and log file
-  pino.multistream([
-    { stream: pino.destination(2) }, // stderr
-    { stream: logFileStream }, // log file
-  ])
+  pino.multistream(streams)
 );
 
-// Log the log file location on startup
-pinoLogger.info(`Log file: ${logFilePath}`);
+// Log the log file location if enabled
+if (logFilePath) {
+  pinoLogger.info(`Log file: ${logFilePath}`);
+}
 
 /**
  * Simplified logger wrapper with consistent API

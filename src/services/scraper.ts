@@ -82,6 +82,8 @@ export class AlkoScraper {
   private backoff: ExponentialBackoff;
   private cache: LRUCache<string, AvailabilityResult>;
   private firestore = getFirestoreService();
+  private idleTimer: NodeJS.Timeout | null = null;
+  private readonly idleTimeoutMs = 30_000; // Close browser after 30s of inactivity to save RAM
 
   constructor() {
     this.rateLimiter = new RateLimiter(config.scrapeRateLimitMs);
@@ -93,10 +95,29 @@ export class AlkoScraper {
   }
 
   /**
+   * Reset the idle timer. If no scraper requests occur within idleTimeoutMs,
+   * the browser is automatically closed to reclaim memory.
+   */
+  public resetIdleTimer(): void {
+    if (this.idleTimer) {
+      clearTimeout(this.idleTimer);
+      this.idleTimer = null;
+    }
+    if (this.browser) {
+      this.idleTimer = setTimeout(async () => {
+        logger.info('Closing idle Alko browser to conserve memory');
+        await this.close().catch((err) => logger.warn('Failed to close idle Alko browser', { err }));
+      }, this.idleTimeoutMs);
+      this.idleTimer.unref();
+    }
+  }
+
+  /**
    * Initialize the browser
    */
   async init(): Promise<void> {
     if (this.browser) {
+      this.resetIdleTimer();
       return;
     }
 
@@ -124,8 +145,8 @@ export class AlkoScraper {
         '--metrics-recording-only',
         '--no-first-run',
         '--safebrowsing-disable-auto-update',
-        // Memory optimizations
-        '--js-flags=--max-old-space-size=512',
+        // Memory optimizations: keep Chromium JS heap low
+        '--js-flags=--max-old-space-size=128',
       ],
     });
 
@@ -148,6 +169,7 @@ export class AlkoScraper {
       window.chrome = { runtime: {} };
     `);
 
+    this.resetIdleTimer();
     logger.info('Browser initialized');
   }
 
@@ -269,6 +291,8 @@ export class AlkoScraper {
       }
 
       throw error;
+    } finally {
+      this.resetIdleTimer();
     }
   }
 
@@ -437,6 +461,8 @@ export class AlkoScraper {
       }
 
       return null;
+    } finally {
+      this.resetIdleTimer();
     }
   }
 
@@ -721,6 +747,8 @@ export class AlkoScraper {
       }
 
       throw error;
+    } finally {
+      this.resetIdleTimer();
     }
   }
 
@@ -906,6 +934,8 @@ export class AlkoScraper {
       }
 
       throw error;
+    } finally {
+      this.resetIdleTimer();
     }
   }
 
@@ -913,6 +943,10 @@ export class AlkoScraper {
    * Close the browser
    */
   async close(): Promise<void> {
+    if (this.idleTimer) {
+      clearTimeout(this.idleTimer);
+      this.idleTimer = null;
+    }
     if (this.browser) {
       await this.browser.close();
       this.browser = null;

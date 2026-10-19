@@ -18,9 +18,30 @@ export class WhiskybaseScraper {
   constructor() {
     this.backoff = new ExponentialBackoff();
     this.memoryCache = new LRUCache<string, WhiskybaseRatingResult>({
-      max: 500,
+      max: 100,
       ttl: 60 * 60 * 1000, // 1 hour
     });
+  }
+
+  private idleTimer: NodeJS.Timeout | null = null;
+  private readonly idleTimeoutMs = 30_000; // Close browser after 30s of inactivity to save RAM
+
+  /**
+   * Reset the idle timer. If no scraper requests occur within idleTimeoutMs,
+   * the browser is automatically closed to reclaim memory.
+   */
+  public resetIdleTimer(): void {
+    if (this.idleTimer) {
+      clearTimeout(this.idleTimer);
+      this.idleTimer = null;
+    }
+    if (this.browser) {
+      this.idleTimer = setTimeout(async () => {
+        logger.info('Closing idle Whiskybase browser to conserve memory');
+        await this.close().catch((err) => logger.warn('Failed to close idle Whiskybase browser', { err }));
+      }, this.idleTimeoutMs);
+      this.idleTimer.unref();
+    }
   }
 
   /**
@@ -28,6 +49,7 @@ export class WhiskybaseScraper {
    */
   async init(): Promise<void> {
     if (this.browser) {
+      this.resetIdleTimer();
       return;
     }
 
@@ -40,6 +62,19 @@ export class WhiskybaseScraper {
         '--disable-features=IsolateOrigins,site-per-process',
         '--no-sandbox',
         '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-gpu',
+        '--no-zygote',
+        '--single-process',
+        '--disable-extensions',
+        '--disable-background-networking',
+        '--disable-default-apps',
+        '--disable-sync',
+        '--disable-translate',
+        '--metrics-recording-only',
+        '--no-first-run',
+        '--safebrowsing-disable-auto-update',
+        '--js-flags=--max-old-space-size=128',
       ],
     });
 
@@ -50,6 +85,7 @@ export class WhiskybaseScraper {
       locale: 'en-US',
     });
 
+    this.resetIdleTimer();
     logger.info('Whiskybase browser initialized');
   }
 
@@ -448,10 +484,15 @@ export class WhiskybaseScraper {
     } finally {
       // Always cleanly close the page to free memory and prevent navigation conflicts
       await page.close().catch(() => {});
+      this.resetIdleTimer();
     }
   }
 
   async close(): Promise<void> {
+    if (this.idleTimer) {
+      clearTimeout(this.idleTimer);
+      this.idleTimer = null;
+    }
     if (this.browser) {
       await this.browser.close();
       this.browser = null;

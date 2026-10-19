@@ -82,13 +82,14 @@ RUN mkdir -p ./data
 # Set environment variables
 ENV NODE_ENV=production
 ENV MCP_TRANSPORT=http
+# Cap V8 old space size to 320MB so garbage collection runs before hitting 512MB container limits
+ENV NODE_OPTIONS="--max-old-space-size=320"
 
 # Expose port
 EXPOSE 8080
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-    CMD node -e "fetch('http://localhost:8080/health').then(r => process.exit(r.ok ? 0 : 1))"
+# Note: Health checks are performed natively by host platforms (e.g. Render / Cloud Run) on /health.
+# Dockerfile HEALTHCHECK is omitted to avoid spawning periodic Node.js child processes inside low-memory containers.
 
 # Start the server
 CMD ["node", "dist/server.js"]

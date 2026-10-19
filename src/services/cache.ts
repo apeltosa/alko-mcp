@@ -19,17 +19,17 @@ export class CacheService {
     searchTtl?: number;
   } = {}) {
     this.productCache = new LRUCache<string, Product>({
-      max: options.productMaxSize || 5000,
+      max: options.productMaxSize || parseInt(process.env.PRODUCT_CACHE_MAX_SIZE || '1000', 10),
       ttl: options.productTtl || 1000 * 60 * 60, // 1 hour default
     });
 
     this.searchCache = new LRUCache<string, Product[]>({
-      max: options.searchMaxSize || 500,
+      max: options.searchMaxSize || parseInt(process.env.SEARCH_CACHE_MAX_SIZE || '50', 10),
       ttl: options.searchTtl || 1000 * 60 * 15, // 15 minutes default
     });
 
     this.statsDataCache = new LRUCache<string, AnyObject>({
-      max: 100,
+      max: 20,
       ttl: 1000 * 60 * 60, // 1 hour
     });
   }

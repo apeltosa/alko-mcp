@@ -363,6 +363,13 @@ async function startHttpServer(server: McpServer): Promise<void> {
   logger.info(`Starting MCP server with HTTP transport on port ${config.port}`);
   logger.info(`API token authentication: ${config.apiToken ? 'enabled' : 'disabled (local dev)'}`);
 
+  // Initialize transport once and connect to McpServer singleton
+  // rather than reconnecting on every incoming request
+  const transport = new StreamableHTTPServerTransport({
+    sessionIdGenerator: undefined,
+  });
+  await server.connect(transport);
+
   const httpServer = createServer(async (req, res) => {
     // Health check endpoint (no auth required)
     if (req.url === '/health' && req.method === 'GET') {
@@ -380,12 +387,7 @@ async function startHttpServer(server: McpServer): Promise<void> {
 
     // MCP endpoint
     if (req.url === '/mcp' || req.url === '/') {
-      const transport = new StreamableHTTPServerTransport({
-        sessionIdGenerator: undefined,
-      });
-
-      // Handle the request
-      await transport.handleRequest(req, res, await server.connect(transport));
+      await transport.handleRequest(req, res);
       return;
     }
 
@@ -425,7 +427,12 @@ async function main(): Promise<void> {
       const alkoScraper = getAlkoScraper();
       const vivinoScraper = getVivinoScraper();
       const whiskybaseScraper = getWhiskybaseScraper();
-      await Promise.all([alkoScraper.close(), vivinoScraper.close(), whiskybaseScraper.close()]);
+      await Promise.allSettled([
+        server.close(),
+        alkoScraper.close(),
+        vivinoScraper.close(),
+        whiskybaseScraper.close(),
+      ]);
       process.exit(0);
     });
 
@@ -434,7 +441,12 @@ async function main(): Promise<void> {
       const alkoScraper = getAlkoScraper();
       const vivinoScraper = getVivinoScraper();
       const whiskybaseScraper = getWhiskybaseScraper();
-      await Promise.all([alkoScraper.close(), vivinoScraper.close(), whiskybaseScraper.close()]);
+      await Promise.allSettled([
+        server.close(),
+        alkoScraper.close(),
+        vivinoScraper.close(),
+        whiskybaseScraper.close(),
+      ]);
       process.exit(0);
     });
   } catch (error) {

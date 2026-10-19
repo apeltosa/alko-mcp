@@ -18,16 +18,36 @@ export class VivinoScraper {
   private backoff: ExponentialBackoff;
   // L1 in-memory cache for fast access (1 hour TTL)
   private memoryCache: LRUCache<string, VivinoRatingResult>;
+  private idleTimer: NodeJS.Timeout | null = null;
+  private readonly idleTimeoutMs = 30_000; // Close browser after 30s of inactivity to save RAM
 
   constructor() {
     // Use 3 second rate limit for Vivino (be respectful)
     this.rateLimiter = new RateLimiter(3000);
     this.backoff = new ExponentialBackoff();
-    // L1 cache: in-memory for fast access
+    // L1 cache: in-memory for fast access (keep max low for 512MB RAM)
     this.memoryCache = new LRUCache<string, VivinoRatingResult>({
-      max: 500,
+      max: 100,
       ttl: 60 * 60 * 1000, // 1 hour
     });
+  }
+
+  /**
+   * Reset the idle timer. If no scraper requests occur within idleTimeoutMs,
+   * the browser is automatically closed to reclaim memory.
+   */
+  public resetIdleTimer(): void {
+    if (this.idleTimer) {
+      clearTimeout(this.idleTimer);
+      this.idleTimer = null;
+    }
+    if (this.browser) {
+      this.idleTimer = setTimeout(async () => {
+        logger.info('Closing idle Vivino browser to conserve memory');
+        await this.close().catch((err) => logger.warn('Failed to close idle Vivino browser', { err }));
+      }, this.idleTimeoutMs);
+      this.idleTimer.unref();
+    }
   }
 
   /**
@@ -35,6 +55,7 @@ export class VivinoScraper {
    */
   async init(): Promise<void> {
     if (this.browser) {
+      this.resetIdleTimer();
       return;
     }
 
@@ -47,6 +68,19 @@ export class VivinoScraper {
         '--disable-features=IsolateOrigins,site-per-process',
         '--no-sandbox',
         '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-gpu',
+        '--no-zygote',
+        '--single-process',
+        '--disable-extensions',
+        '--disable-background-networking',
+        '--disable-default-apps',
+        '--disable-sync',
+        '--disable-translate',
+        '--metrics-recording-only',
+        '--no-first-run',
+        '--safebrowsing-disable-auto-update',
+        '--js-flags=--max-old-space-size=128',
       ],
     });
 
@@ -67,6 +101,7 @@ export class VivinoScraper {
       window.chrome = { runtime: {} };
     `);
 
+    this.resetIdleTimer();
     logger.info('Vivino browser initialized');
   }
 
@@ -361,6 +396,8 @@ export class VivinoScraper {
       };
 
       return result;
+    } finally {
+      this.resetIdleTimer();
     }
   }
 
@@ -510,6 +547,8 @@ export class VivinoScraper {
         error: error instanceof Error ? error.message : 'Unknown error occurred',
         fromCache: false,
       };
+    } finally {
+      this.resetIdleTimer();
     }
   }
 
@@ -517,6 +556,10 @@ export class VivinoScraper {
    * Close the browser
    */
   async close(): Promise<void> {
+    if (this.idleTimer) {
+      clearTimeout(this.idleTimer);
+      this.idleTimer = null;
+    }
     if (this.browser) {
       await this.browser.close();
       this.browser = null;
